@@ -142,10 +142,10 @@ segments      0    0  0 …  0     0     1  1 …  1     1
 ```python
 data = GoldStandardDataset("data/gold_standard_data", max_protein_length=512, batch_size=32)
 
-data.mlm_loader("train")      # positive pairs only, with masking   → pair pre-training
+data.mlm_loader("train")  # positive pairs only, with masking   → pair pre-training
 data.classif_loader("train")  # all pairs, with 0/1 labels          → classification
-data.classif_loader("val")    # model selection, early stopping
-data.classif_loader("test")   # final evaluation only
+data.classif_loader("val")  # model selection, early stopping
+data.classif_loader("test")  # final evaluation only
 ```
 
 ---
