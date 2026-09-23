@@ -1,3 +1,13 @@
+# Données (non versionnées, voir README pour le téléchargement)
+/data/
+
+# macOS
+.DS_Store
+
+# vscode config 
+.vscode/
+
+
 # Byte-compiled / optimized / DLL files
 __pycache__/
 *.py[codz]
