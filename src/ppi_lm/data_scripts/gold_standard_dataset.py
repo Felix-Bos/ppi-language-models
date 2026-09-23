@@ -1,4 +1,3 @@
-import os
 from pathlib import Path
 
 from ppi_lm.data_scripts.tokenizer import ProteinTokenizer
@@ -22,19 +21,14 @@ class GoldStandardDataset:
         self.num_workers = num_workers
 
     def _read_fasta(self, file_path: Path) -> dict[str, str]:
-        """ Reads a FASTA file and returns a dictionary mapping sequence IDs to sequences."""
+        """Reads a FASTA file and returns a dictionary mapping sequence IDs to sequences."""
         seqs: dict[str, str] = {}
-        with open(file_path, "r") as f:
+        with open(file_path) as f:
             lines = [line.strip() for line in f if line.strip()]
-        for header, seq in zip(lines[0::2], lines[1::2]):
-            assert header.startswith(">") 
+        for header, seq in zip(lines[0::2], lines[1::2], strict=False):
+            assert header.startswith(">")
             seqs[header[1:].split()[0]] = seq
         return seqs
-    
+
     def _read_pairs(self):
         pass
-    
-    
-    
-    
-                
