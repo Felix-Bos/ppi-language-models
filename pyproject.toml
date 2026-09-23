@@ -25,7 +25,14 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "UP", "B"]   # erreurs, imports triés, syntaxe moderne, bugs courants
+select = ["E", "F", "I", "UP", "B", "C90", "PLR09"]   # erreurs, imports triés, syntaxe moderne, bugs courants, complexité
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.pylint]
+max-args = 8              # constructeurs de datasets/modèles = beaucoup d'hyperparamètres
+max-positional-args = 8
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
