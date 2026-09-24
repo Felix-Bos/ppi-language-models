@@ -84,7 +84,8 @@ from ppi_lm.data_scripts.gold_standard_dataset import GoldStandardDataset
 
 ```
 ppi-language-models/
-├── .github/workflows/ci.yml          # lint (ruff) + tests (pytest) on every push
+├── .github/workflows/ci.yml          # lint (ruff + black) + tests (pytest) on every push
+├── .pre-commit-config.yaml           # ruff (lint + fix, format) + black on every commit
 ├── data/                             # datasets (not versioned)
 ├── notebooks/                        # exploration and visualizations
 ├── src/ppi_lm/
@@ -244,11 +245,43 @@ Reference points for the MLM loss: guessing uniformly among 20 amino acids gives
 
 ```bash
 pytest -v          # unit tests (synthetic mini-dataset, no real data needed)
-ruff check .       # lint
+ruff check --fix . # lint (+ auto-fix)
 ruff format .      # format
+black .            # format (notebooks excluded)
 ```
 
-Tests cover the tokenizer, file loading, pair construction, cropping, augmentation, padding, MLM masking (never on special tokens or padding, ~15 % selection, spans, 80/10/10 rule, dynamic masking) and the DataLoaders. The GitHub Actions workflow runs ruff and pytest (CPU PyTorch) on every push to `main` and on pull requests.
+Tests cover the tokenizer, file loading, pair construction, cropping, augmentation, padding, MLM masking (never on special tokens or padding, ~15 % selection, spans, 80/10/10 rule, dynamic masking) and the DataLoaders.
+
+### Code quality rules
+
+Configured in `pyproject.toml` (line length 100, Python 3.10), for both ruff and black. The ruff lint rules are:
+
+| Rules | Checks |
+|---|---|
+| `E`, `F` | style errors, undefined names, unused imports / variables |
+| `I` | import sorting |
+| `UP` | modern Python syntax |
+| `B` | common bugs (bugbear) |
+| `C90` | cyclomatic complexity (McCabe), at most **10** per function |
+| `PLR09` | function size: too many branches, statements, returns or arguments (at most **8** arguments, since dataset / model constructors take many hyper-parameters) |
+
+Tool versions are pinned (`ruff==0.16.8`, `black==26.5.1`) in `pyproject.toml`, in the pre-commit config and in CI, so that local checks and CI always agree.
+
+### Pre-commit
+
+```bash
+pre-commit install          # once per clone: runs the hooks on every git commit
+pre-commit run --all-files  # run them manually on the whole repository
+```
+
+On each commit, the hooks in `.pre-commit-config.yaml` run on the staged files: `ruff check --fix` (auto-fixes what it can), `ruff format`, then `black` (Python files only, notebooks are left untouched). If a hook modifies a file, the commit is stopped: `git add` the changes and commit again.
+
+### Continuous integration
+
+The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `main` and on pull requests, with two jobs:
+
+- **Lint**: `ruff check .`, `ruff format --check .` and `black --check .` (check only, nothing is modified);
+- **Tests**: `pytest -v` with CPU PyTorch.
 
 ---
 
