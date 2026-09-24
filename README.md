@@ -4,19 +4,29 @@
 
 From-scratch PyTorch implementations of four sequence architectures — a **bidirectional Mamba (SSM)**, a **bidirectional (BERT-style) Transformer encoder**, a **bidirectional LSTM** and a **dilated CNN** — used as protein language models for **protein–protein interaction (PPI) prediction**, on a leakage-free benchmark.
 
+They are compared with a large **pre-trained protein language model (ESM-2), kept frozen**, validated against **3D complexes predicted by OpenFold3**, and will eventually be brought together in a **local web platform** to train the models, predict interactions and compare what each model looks at.
+
 > **Status: work in progress.** Results will be added below as they come in.
 >
 > - [x] Data pipeline: tokenizer, pair datasets, cropping, augmentation, MLM masking, loaders + tests
 > - [ ] Models: Transformer → dilated CNN → BiLSTM → BiMamba
 > - [ ] Training loops (MLM, classification) and evaluation
-> - [ ] Experiments A and B
-> - [ ] Analyses and visualizations
+> - [ ] Experiments A and B (from scratch)
+> - [ ] Experiment C: frozen pre-trained encoder (ESM-2) + trained heads
+> - [ ] Structural validation with OpenFold3 complexes
+> - [ ] Analyses and visualizations, including interpretability for the four architectures
+> - [ ] Local PPI platform (web app), see [Next step](#next-step-a-local-ppi-platform)
 
 ---
 
 ## Research question
 
 **Does masked language modeling (MLM) pre-training help a small protein language model predict protein–protein interactions, compared with training directly on the interaction labels — and does the answer depend on the architecture?**
+
+Two complementary questions follow from it:
+
+- **How far are these small from-scratch models from a large pre-trained model?** A frozen ESM-2 encoder with a trained head (experiment C) gives the reference ceiling for this code base.
+- **Do the models look at the right place?** Interaction scores, residue importance and attention are compared with the interface of the complex predicted by OpenFold3.
 
 Everything is kept at "toy" scale on purpose: small models (a few million parameters), a single benchmark, and every architecture written by hand, so that the comparison isolates the effect of the architecture and of the training strategy rather than of scale.
 
@@ -87,6 +97,7 @@ ppi-language-models/
 ├── .github/workflows/ci.yml          # lint (ruff + black) + tests (pytest) on every push
 ├── .pre-commit-config.yaml           # ruff (lint + fix, format) + black on every commit
 ├── data/                             # datasets (not versioned)
+├── docs/PLATFORM.md                  # roadmap: experiment C, OpenFold3 validation, web platform
 ├── notebooks/                        # exploration and visualizations
 ├── src/ppi_lm/
 │   ├── data_scripts/
@@ -172,7 +183,7 @@ The Transformer is implemented first: it is the best documented of the four and 
 
 ## Experiments
 
-Two training strategies are compared, for each of the four architectures. Everything except the pre-training is identical between them: input format, encoder, classification head, training / validation / test data and metric.
+Three strategies are compared. A and B train each of the four architectures from scratch; everything except the pre-training is identical between them: input format, encoder, classification head, training / validation / test data and metric. C replaces the from-scratch encoder by a large frozen pre-trained one, to measure the gap with pre-training at scale.
 
 ### Experiment A — direct training
 
@@ -192,10 +203,34 @@ Two training strategies are compared, for each of the four architectures. Everyt
    - **fine-tuned encoder**: encoder and head trained together, with a lower learning rate for the encoder.
 4. **Test** on `Intra2`.
 
+### Experiment C — frozen pre-trained encoder (ESM-2)
+
+A large protein language model, pre-trained on millions of sequences, is used **frozen**: only a prediction head is trained on the gold-standard dataset. It answers the question: how far are the from-scratch models from what pre-training at scale gives for free?
+
+| Model | Parameters | Embedding size | On a laptop |
+|---|---:|---:|---|
+| `facebook/esm2_t6_8M_UR50D` | 8 M | 320 | instant, for prototyping |
+| `facebook/esm2_t12_35M_UR50D` | 35 M | 480 | very fast |
+| `facebook/esm2_t30_150M_UR50D` | 150 M | 640 | **recommended trade-off** |
+| `facebook/esm2_t33_650M_UR50D` | 650 M | 1280 | feasible, slower |
+
+1. **Embed once.** The frozen encoder runs a single time over every protein of the dataset (20,386 sequences); one vector per residue is stored in float16, keyed by UniProt id. Training then only costs the head, which keeps it feasible on a laptop.
+2. **Crop consistently**, with the same `max_protein_length` policy as A and B (ESM-2 itself is limited to 1,022 residues).
+3. **Train heads on the stored embeddings**, with the same splits (`Intra1` / `Intra0` / `Intra2`) and the same metric (test AUROC):
+
+| Head | Input | Why |
+|---|---|---|
+| Pooled MLP | mean-pooled A and B → `[a, b, a·b, \|a − b\|]` → MLP | Simplest baseline, **symmetric by construction**: f(A, B) = f(B, A) |
+| The four architectures | per-residue ESM-2 embeddings of `A <SEP> B` instead of token embeddings | Same comparison as A and B, with a much richer input |
+| Cross-attention | residues of A attend to residues of B (and the reverse), then pooling | Produces an explicit **A × B interaction map**, the most interpretable option |
+
+If a frozen encoder plateaus, the next step is light adaptation rather than full fine-tuning: low-rank adapters (LoRA) on a small ESM-2 train a few hundred thousand parameters and remain feasible on a laptop. The literature reports that PLM-based models plateau at an accuracy of about 0.65 on this benchmark (Reim et al., 2025); experiment C gives that ceiling for this code base.
+
 ### Leakage safeguards
 
 - Pair MLM and classification only ever use **training** pairs. Validation is used for model selection only; the test set is evaluated once, at the very end.
 - Step B.1 sees single sequences only (no interaction information), which is standard practice for protein language models (ESM does the same). To be fully conservative, it can be restricted to training proteins; both variants can be compared.
+- In C, ESM-2 was pre-trained on UniRef, which contains the test proteins as single sequences, but never saw interaction labels: like B.1, it only learns from sequences.
 - The absence of protein overlap between splits is checked by a unit test (on the synthetic mini-dataset in CI; it can be run on the real data locally).
 
 ### Fairness of the comparison
@@ -213,6 +248,17 @@ B receives more total compute than A (two extra pre-training stages). To make su
 | BiLSTM | | | |
 | BiMamba | | | |
 
+**Experiment C — frozen ESM-2 (test)**
+
+| Head | Test AUROC | Test accuracy |
+|---|---|---|
+| Pooled MLP | | |
+| Transformer on ESM-2 embeddings | | |
+| Dilated CNN on ESM-2 embeddings | | |
+| BiLSTM on ESM-2 embeddings | | |
+| BiMamba on ESM-2 embeddings | | |
+| Cross-attention | | |
+
 **Pair MLM (validation)**
 
 | Architecture | Perplexity with true partner | Perplexity with random partner |
@@ -226,18 +272,70 @@ Reference points for the MLM loss: guessing uniformly among 20 amino acids gives
 
 ---
 
+## Structural validation with OpenFold3
+
+Sequence models predict *whether* two proteins interact, not *how*. [OpenFold3](https://github.com/aqlaboratory/openfold-3), an open reproduction of AlphaFold3 run locally through [OpenFold3-MLX](https://github.com/latent-spacecraft/openfold-3-mlx), predicts the 3D structure of a **complex** from the two sequences. This gives a structural reference to check the models against. The single-protein side (structure, per-residue confidence, attention analysis) already exists in [OpenFold Studio](https://github.com/Felix-Bos/openfold-studio).
+
+Outputs used from a two-chain prediction:
+
+- **ipTM** (interface predicted TM-score, 0–1): confidence in the relative placement of the two chains. Above about 0.8 the interface is usually reliable; below about 0.6 it is likely wrong.
+- **Inter-chain PDE / PAE**: the A × B block of the predicted error matrix, i.e. how sure the model is about each part of the interface.
+- **Interface contacts**: residue pairs (i in A, j in B) whose alpha carbons are closer than 8 Å.
+
+Analyses:
+
+1. **ipTM vs. PPI score**: correlation between each model's predicted probability and ipTM, on positive and negative pairs.
+2. **Attention and importance vs. interface**: share of the A → B attention (Transformer, cross-attention head) and of the residue importance (all models) that falls on predicted interface contacts, compared with random pairs (enrichment).
+3. **Case studies**: a few test pairs shown side by side, with the model predictions, the predicted complex, the interface and the attention maps.
+
+Caveats: a predicted complex is **not proof of interaction** (OpenFold3 builds a complex for any two proteins; only a low ipTM betrays a wrong one), memory grows quickly with the combined length, and each complex takes minutes. This is an analysis on tens of short test pairs (e.g. A + B ≤ 400 residues), not on the whole test set.
+
+---
+
 ## Planned analyses and visualizations
 
 - **Does the model use the partner?** MLM perplexity on protein A with its true partner vs. with a random protein as B. A lower perplexity with the true partner means the model exploits interaction information.
 - **Amino-acid embeddings.** PCA of the learned embedding matrix, colored by physico-chemical class (hydrophobic, charged, polar, aromatic).
 - **MLM confusion matrix vs. BLOSUM62.** Which amino acid is predicted instead of the true one, compared with evolutionary substitution rates.
 - **Latent space.** UMAP of mean-pooled protein embeddings (colored by length, family, subcellular location) and of pair embeddings (colored by label), for A vs. B.
-- **Attention maps** (Transformer): which regions of B each residue of A attends to.
+- **Attention maps** (Transformer, cross-attention head): which regions of B each residue of A attends to, with the metrics used in [OpenFold Studio](https://github.com/Felix-Bos/openfold-studio): focus (1 − normalized entropy), local vs. long-range mass, **cross-protein mass** (share of A's attention that goes to B, per layer and head, for positive vs. negative pairs) and **attention sinks** (`<CLS>`, `<SEP>` or a few residues absorbing attention, to exclude before interpretation).
+- **Residue importance for all four architectures.** Only the Transformer has attention maps, so every model also gets an architecture-agnostic view: **integrated gradients** on the inputs with respect to the interaction logit (via Captum), one score per residue of A and B. Do the four models look at the same regions, and at the predicted interface?
 - **Known shortcuts.** Performance as a function of protein length and of node degree (number of partners in training), since previous work showed that PPI models often exploit degree rather than sequence.
 - **Order symmetry.** Gap between the predictions for `(A, B)` and `(B, A)`, with and without pair-order augmentation, and test-time averaging of both orders.
 - **Effect of cropping.** Test AUROC on the full test set vs. on pairs that fit entirely in the context window.
 - **Scaling with length.** Training time and memory per architecture as `max_protein_length` grows (e.g. 256 → 512 → 1000), where linear-time models (CNN, LSTM, Mamba) are expected to scale better than attention.
 - Standard curves: training / validation losses, ROC curves.
+
+---
+
+## Next step: a local PPI platform
+
+Once the experiments are in place, everything will be brought together in **one local web app**, following the design and architecture of [OpenFold Studio](https://github.com/Felix-Bos/openfold-studio): train the models, predict interactions, look at the proteins and their complex in 3D, and compare what each model pays attention to.
+
+```mermaid
+flowchart LR
+    S[Pick or paste<br/>proteins A and B] --> P1[Structure of A<br/>OpenFold3]
+    S --> P2[Structure of B<br/>OpenFold3]
+    S --> C[Complex A + B<br/>OpenFold3 multimer]
+    S --> M[Interaction prediction<br/>selected models]
+    M --> I[Attention and importance<br/>per model]
+    C --> V[Compare with the<br/>predicted interface]
+    I --> V
+    T[Training runs] --> M
+```
+
+| Page | Content |
+|---|---|
+| **Train** | Launch a run: architecture, strategy (A direct, B pre-training, C frozen ESM-2), hyper-parameters; live loss and validation AUROC curves |
+| **Run / Leaderboard** | One run in detail (curves, ROC, confusion matrix, training time), and all runs compared, with the results tables above filled automatically |
+| **Protein** | OpenFold3 structure of one protein, coloured by confidence, with its per-residue confidence analysis |
+| **Pair explorer** | Both structures, the predicted complex (ipTM, interface), every model's interaction probability, and side-by-side residue importance and attention maps, with their overlap with the interface |
+| **Model analyses** | The figures listed above, generated from finished runs |
+| **Dataset / Guide** | Split statistics and leakage checks; how each architecture and metric works |
+
+Design principles carried over from OpenFold Studio: layered backend (thin views, services, pure and tested domain logic, adapters for external tools), the `ppi_lm` package kept independent of the platform, heavy work (training, embedding, folding) in background jobs with OpenFold3 in its own Python environment, one directory per run / structure / complex, live metrics streamed to the browser, and everything sized for a laptop (Apple Silicon, `mps`, one GPU job at a time).
+
+The full roadmap, with milestones, is in [docs/PLATFORM.md](docs/PLATFORM.md).
 
 ---
 
@@ -291,6 +389,8 @@ The GitHub Actions workflow (`.github/workflows/ci.yml`) runs on every push to `
 - Bernett, J. (2022). *PPI prediction from sequence, gold standard dataset.* figshare. <https://doi.org/10.6084/m9.figshare.21591618>
 - Reim, T., Hartebrodt, A., Blumenthal, D. B., Bernett, J., & List, M. (2025). *Deep learning models for unbiased sequence-based PPI prediction plateau at an accuracy of 0.65.* Bioinformatics.
 - Liu, D., et al. (2025). *PLM-interact: extending protein language models to predict protein–protein interactions.* Nature Communications.
+- Abramson, J., et al. (2024). *Accurate structure prediction of biomolecular interactions with AlphaFold 3.* Nature.
+- Sundararajan, M., Taly, A., & Yan, Q. (2017). *Axiomatic attribution for deep networks (integrated gradients).* ICML.
 - Devlin, J., et al. (2019). *BERT: Pre-training of deep bidirectional transformers for language understanding.* NAACL.
 - Gu, A., & Dao, T. (2023). *Mamba: Linear-time sequence modeling with selective state spaces.*
 - Lin, Z., et al. (2023). *Evolutionary-scale prediction of atomic-level protein structure with a language model (ESM-2).* Science.
