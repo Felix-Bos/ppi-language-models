@@ -1,7 +1,15 @@
 import pytest
 import torch
 
-from ppi_lm.models.shared.heads import cls_pool, masked_max_pool, masked_mean_pool, pair_pool
+from ppi_lm.data_scripts.tokenizer import ProteinTokenizer
+from ppi_lm.models.shared.heads import (
+    ClassificationHead,
+    MLMHead,
+    cls_pool,
+    masked_max_pool,
+    masked_mean_pool,
+    pair_pool,
+)
 
 B, L, D = 3, 7, 4
 
@@ -182,3 +190,214 @@ def test_pair_pool_batches_rows_independently():
     batched = pair_pool(*(torch.cat(t, dim=0) for t in zip(*rows, strict=True)))
     for i, row in enumerate(rows):
         torch.testing.assert_close(batched[i], pair_pool(*row)[0])
+
+
+# --- ClassificationHead ---------------------------------------------------------
+
+
+def linear_layers(module: torch.nn.Module) -> list[torch.nn.Linear]:
+    return [m for m in module.modules() if isinstance(m, torch.nn.Linear)]
+
+
+def count(module: torch.nn.Module, kind: type) -> int:
+    return sum(isinstance(m, kind) for m in module.modules())
+
+
+def test_classif_output_is_one_logit_per_pair():
+    head = ClassificationHead(input_dim=8, hidden_dims=(16,))
+    assert head(torch.randn(5, 8)).shape == (5,)
+
+
+def test_classif_multi_output_keeps_last_dim():
+    head = ClassificationHead(input_dim=8, output_dim=3, hidden_dims=(16,))
+    assert head(torch.randn(5, 8)).shape == (5, 3)
+
+
+def test_classif_no_hidden_layer_is_a_linear_probe():
+    head = ClassificationHead(input_dim=8, hidden_dims=())
+    assert [(m.in_features, m.out_features) for m in linear_layers(head)] == [(8, 1)]
+
+
+def test_classif_layer_sizes_follow_hidden_dims():
+    head = ClassificationHead(input_dim=8, hidden_dims=[32, 16])  # a list, as read from yaml
+    sizes = [(m.in_features, m.out_features) for m in linear_layers(head)]
+    assert sizes == [(8, 32), (32, 16), (16, 1)]
+
+
+def test_classif_single_activation_applies_to_every_layer():
+    head = ClassificationHead(input_dim=8, hidden_dims=(16, 16), activations="relu")
+    assert count(head, torch.nn.ReLU) == 2
+    assert head.activations == ("relu", "relu")
+
+
+def test_classif_one_activation_per_layer():
+    head = ClassificationHead(input_dim=8, hidden_dims=(16, 16), activations=["gelu", "silu"])
+    assert count(head, torch.nn.GELU) == 1
+    assert count(head, torch.nn.SiLU) == 1
+
+
+def test_classif_activation_count_mismatch_fails():
+    with pytest.raises(ValueError, match="activations"):
+        ClassificationHead(input_dim=8, hidden_dims=(16, 16), activations=["gelu"])
+
+
+def test_classif_unknown_activation_fails():
+    with pytest.raises(ValueError, match="Unknown activation"):
+        ClassificationHead(input_dim=8, hidden_dims=(16,), activations="tanh")
+
+
+@pytest.mark.parametrize("norm, expected", [(False, 0), (True, 2)])
+def test_classif_norm_adds_one_layernorm_per_hidden_layer(norm, expected):
+    head = ClassificationHead(input_dim=8, hidden_dims=(16, 16), norm=norm)
+    assert count(head, torch.nn.LayerNorm) == expected
+
+
+def test_classif_outputs_raw_logits():
+    """No sigmoid inside: the loss is BCEWithLogitsLoss."""
+    torch.manual_seed(0)
+    head = ClassificationHead(input_dim=8, hidden_dims=())
+    out = head(10 * torch.randn(100, 8))
+    assert (out < 0).any() and (out > 1).any()
+
+
+def test_classif_eval_is_deterministic_train_uses_dropout():
+    torch.manual_seed(0)
+    head = ClassificationHead(input_dim=8, hidden_dims=(64,), dropout=0.5)
+    x = torch.randn(16, 8)
+    head.eval()
+    assert torch.equal(head(x), head(x))
+    head.train()
+    assert not torch.equal(head(x), head(x))
+
+
+def test_classif_gradients_reach_every_parameter():
+    head = ClassificationHead(input_dim=8, hidden_dims=(16, 16), norm=True)
+    loss = torch.nn.BCEWithLogitsLoss()(head(torch.randn(4, 8)), torch.tensor([0.0, 1, 1, 0]))
+    loss.backward()
+    for name, p in head.named_parameters():
+        assert p.grad is not None and p.grad.abs().sum() > 0, name
+
+
+def test_classif_on_pair_pool_is_symmetric():
+    """pair_pool is symmetric, so the whole pooling + head is too."""
+    len_a, len_b = 5, 3
+    hidden, attention_mask, segment_ids = make_pair(len_a, len_b, pad=0)
+    n_a = len_a + 2
+    hidden_swapped = torch.cat([hidden[:, n_a:], hidden[:, :n_a]], dim=1)
+    segment_swapped = torch.tensor([[0] * (len_b + 1) + [1] * n_a])
+
+    head = ClassificationHead(input_dim=2 * D, hidden_dims=(16,)).eval()
+    torch.testing.assert_close(
+        head(pair_pool(hidden, attention_mask, segment_ids)),
+        head(pair_pool(hidden_swapped, attention_mask, segment_swapped)),
+    )
+
+
+# --- MLMHead --------------------------------------------------------------------
+
+VOCAB = ProteinTokenizer().vocab_size
+
+
+def test_mlm_output_shape(hidden):
+    head = MLMHead(d_model=D, vocab_size=VOCAB)
+    assert head(hidden).shape == (B, L, VOCAB)
+
+
+def test_mlm_default_is_esm_bert_transform():
+    """hidden_dims=None -> Linear(d, d) -> activation -> LayerNorm, then decoder."""
+    head = MLMHead(d_model=D, vocab_size=VOCAB)
+    kinds = [type(m) for m in head.transform]
+    assert kinds == [torch.nn.Linear, torch.nn.GELU, torch.nn.LayerNorm]
+    assert (head.transform[0].in_features, head.transform[0].out_features) == (D, D)
+    assert (head.decoder.in_features, head.decoder.out_features) == (D, VOCAB)
+
+
+def test_mlm_no_hidden_layer_is_a_single_linear(hidden):
+    head = MLMHead(d_model=D, vocab_size=VOCAB, hidden_dims=())
+    assert len(head.transform) == 0
+    torch.testing.assert_close(head(hidden), head.decoder(hidden))
+
+
+def test_mlm_layer_sizes_follow_hidden_dims():
+    head = MLMHead(d_model=D, vocab_size=VOCAB, hidden_dims=[32, 16])
+    sizes = [(m.in_features, m.out_features) for m in linear_layers(head)]
+    assert sizes == [(D, 32), (32, 16), (16, VOCAB)]
+
+
+def test_mlm_norm_false_has_no_layernorm():
+    head = MLMHead(d_model=D, vocab_size=VOCAB, norm=False)
+    assert count(head, torch.nn.LayerNorm) == 0
+
+
+@pytest.mark.parametrize("dropout, expected", [(0.0, 0), (0.1, 1)])
+def test_mlm_dropout_layer_only_when_positive(dropout, expected):
+    head = MLMHead(d_model=D, vocab_size=VOCAB, dropout=dropout)
+    assert count(head, torch.nn.Dropout) == expected
+
+
+def test_mlm_activation_count_mismatch_fails():
+    with pytest.raises(ValueError, match="activations"):
+        MLMHead(d_model=D, vocab_size=VOCAB, hidden_dims=(8, 8), activations=["gelu"])
+
+
+def test_mlm_unknown_activation_fails():
+    with pytest.raises(ValueError, match="Unknown activation"):
+        MLMHead(d_model=D, vocab_size=VOCAB, activations="tanh")
+
+
+def test_mlm_tokens_are_independent(hidden):
+    """Changing one token's hidden state only changes that token's logits."""
+    head = MLMHead(d_model=D, vocab_size=VOCAB).eval()
+    changed = hidden.clone()
+    changed[:, 3] += 1.0
+    out, out_changed = head(hidden), head(changed)
+    others = [i for i in range(L) if i != 3]
+    torch.testing.assert_close(out[:, others], out_changed[:, others])
+    assert not torch.allclose(out[:, 3], out_changed[:, 3])
+
+
+def test_mlm_tied_embedding_shares_the_parameter():
+    emb = torch.nn.Embedding(VOCAB, D)
+    head = MLMHead(d_model=D, vocab_size=VOCAB, tied_embedding=emb)
+    assert head.decoder.weight is emb.weight
+    # counted once in a model holding both: embedding + head without its own decoder weight
+    n_total = sum(p.numel() for p in torch.nn.ModuleList([emb, head]).parameters())
+    n_untied_head = sum(p.numel() for p in MLMHead(d_model=D, vocab_size=VOCAB).parameters())
+    assert n_total == n_untied_head  # the embedding matrix replaces the decoder matrix
+
+
+def test_mlm_tied_embedding_follows_updates(hidden):
+    emb = torch.nn.Embedding(VOCAB, D)
+    head = MLMHead(d_model=D, vocab_size=VOCAB, tied_embedding=emb).eval()
+    before = head(hidden)
+    with torch.no_grad():
+        emb.weight.add_(1.0)
+    assert not torch.allclose(before, head(hidden))
+
+
+def test_mlm_tied_embedding_wrong_shape_fails():
+    emb = torch.nn.Embedding(VOCAB, D + 1)
+    with pytest.raises(ValueError, match="cannot be tied"):
+        MLMHead(d_model=D, vocab_size=VOCAB, tied_embedding=emb)
+
+
+def test_mlm_tied_embedding_uses_last_hidden_size():
+    """With hidden_dims, the embedding must match the last hidden size, not d_model."""
+    MLMHead(D, VOCAB, hidden_dims=(8,), tied_embedding=torch.nn.Embedding(VOCAB, 8))
+    with pytest.raises(ValueError, match="cannot be tied"):
+        MLMHead(D, VOCAB, hidden_dims=(8,), tied_embedding=torch.nn.Embedding(VOCAB, D))
+
+
+def test_mlm_loss_ignores_unmasked_positions(hidden):
+    """End to end with the MLMCollator convention: labels = -100 outside masked positions."""
+    head = MLMHead(d_model=D, vocab_size=VOCAB)
+    hidden.requires_grad_(True)
+    labels = torch.full((B, L), -100)
+    labels[:, 2] = 7
+    logits = head(hidden)
+    loss = torch.nn.CrossEntropyLoss(ignore_index=-100)(logits.view(-1, VOCAB), labels.view(-1))
+    loss.backward()
+    assert torch.isfinite(loss)
+    assert (hidden.grad[:, 2] != 0).any()
+    others = [i for i in range(L) if i != 2]
+    assert (hidden.grad[:, others] == 0).all()
