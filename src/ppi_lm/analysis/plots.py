@@ -135,20 +135,19 @@ def _layout(
     """Theme + a top block in fixed rows, so nothing overlaps:
     title, subtitle, legend, subplot titles, then the plot area."""
     t = theme()
-    text = f"<b>{title}</b>"
-    if subtitle:
-        text += f"<br><span style='font-size:12px;color:{t['ink_secondary']}'>{subtitle}</span>"
-    title_block = 52 if subtitle else 34  # px from the top to the end of the title block
+    title_block = 62 if subtitle else 44  # px from the top to the end of the title block
     legend_block = 28 if legend else 0
     has_subplot_titles = bool((fig.layout.meta or {}).get("subplot_titles"))
     top = title_block + legend_block + (30 if has_subplot_titles else 14)
     fig.update_layout(
         template="none",
         title={
-            "text": text,
+            "text": f"<b>{title}</b>",
+            "subtitle": {"text": subtitle, "font": {"size": 12, "color": t["ink_secondary"]}},
             "x": 0.01,
             "xanchor": "left",
-            "y": 1 - 10 / height,
+            "yref": "container",
+            "y": 1 - 16 / height,
             "yanchor": "top",
             "font": {"size": 16, "color": t["ink"]},
         },
@@ -163,7 +162,7 @@ def _layout(
             "x": 0.01,
             "xanchor": "left",
             "yref": "container",
-            "y": 1 - (title_block + 6) / height,
+            "y": 1 - (title_block + 2) / height,
             "yanchor": "top",
             "bgcolor": "rgba(0,0,0,0)",
             "font": {"color": t["ink_secondary"]},
@@ -536,18 +535,18 @@ def plot_metric_by_length(
                 ),
             )
         )
-    crop = np.log10(max_protein_length)  # on a log axis, shapes use log10 coordinates
+    # on a log axis, shapes take data values but annotations take log10 values
     fig.add_shape(
         type="line",
-        x0=crop,
-        x1=crop,
+        x0=max_protein_length,
+        x1=max_protein_length,
         y0=0,
         y1=1,
         yref="paper",
         line={"color": theme()["muted"], "width": 1},
     )
     fig.add_annotation(
-        x=crop,
+        x=np.log10(max_protein_length),
         y=1,
         yref="paper",
         text=f"coupe à {max_protein_length}",
@@ -593,9 +592,9 @@ def plot_order_symmetry(preds: PairPredictions, preds_swapped: PairPredictions) 
         f"{binary_metrics(preds_swapped.labels, preds_swapped.logits)['auroc']:.3f} · "
         f"moyenne des deux ordres {mean['auroc']:.3f}"
     )
-    fig.update_xaxes(title="p(A, B)", range=[0, 1])
-    fig.update_yaxes(title="p(B, A)", range=[0, 1], scaleanchor="x")
-    return _layout(fig, "Symétrie de l'ordre A / B", subtitle, height=520)
+    fig.update_xaxes(title="p(A, B)", range=[0, 1], constrain="domain")
+    fig.update_yaxes(title="p(B, A)", range=[0, 1], scaleanchor="x", constrain="domain")
+    return _layout(fig, "Symétrie de l'ordre A / B", subtitle, height=560)
 
 
 # --- latent space ---------------------------------------------------------------
@@ -870,7 +869,7 @@ def plot_residue_importance(imp: ResidueImportance, top_k: int = 3) -> go.Figure
     fig = _subplots(
         rows=2,
         cols=1,
-        vertical_spacing=0.18,
+        vertical_spacing=0.2,
         subplot_titles=(f"Protéine A · {names[0]}", f"Protéine B · {names[1]}"),
     )
     for row, segment in ((1, 0), (2, 1)):
@@ -904,7 +903,7 @@ def plot_residue_importance(imp: ResidueImportance, top_k: int = 3) -> go.Figure
                     row=row,
                     col=1,
                 )
-        fig.update_xaxes(title="position (résidu)", row=row, col=1)
+        fig.update_xaxes(title="position (résidu)" if row == 2 else None, row=row, col=1)
         fig.update_yaxes(title="IG", row=row, col=1)
     for name, color in (("vers interaction", t["positive"]), ("contre", t["negative"])):
         fig.add_trace(go.Bar(x=[None], y=[None], name=name, marker={"color": color}))

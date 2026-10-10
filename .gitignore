@@ -1,6 +1,9 @@
 # Données (non versionnées, voir README pour le téléchargement)
 /data/
 
+# Runs d'entraînement : checkpoints, métriques, TensorBoard (python -m ppi_lm.training.run)
+/runs/
+
 # macOS
 .DS_Store
 
