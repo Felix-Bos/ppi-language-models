@@ -1,0 +1,89 @@
+# Template for one run. Copy it (e.g. configs/transformer_A.yaml), then edit.
+#
+# Each section is passed as keyword arguments to one constructor, so its keys must be
+# exactly that constructor's argument names (checked by tests/test_config_template.py).
+# Values deduced at run time (vocab_size, pad_id, input_dim, d_model of the heads)
+# are never written here.
+#
+# YAML pitfall: write floats with a dot, `3.0e-4`, not `3e-4` (read as a string).
+
+experiment:
+  name: transformer_A_direct
+  strategy: A            # A: direct classification
+                         # B: MLM pre-training, then classification
+                         # C: frozen ESM-2 encoder + trained head (later)
+  seed: 0
+  output_dir: runs       # one directory per run: runs/<name>/ (config, metrics, checkpoints)
+
+# -> GoldStandardDataset(**data)
+data:
+  data_dir: data/gold_standard_data
+  max_protein_length: 256      # one pair = 2 * 256 + 3 = 515 tokens
+  batch_size: 16               # attention memory grows as batch * n_heads * L^2
+  mask_prob: 0.15              # MLM only
+  augmentation_percent: 0.0    # share of training pairs added again as (B, A)
+  num_workers: 2
+
+model:
+  architecture: transformer    # transformer | cnn | bilstm | bimamba (only transformer for now)
+
+  # -> TransformerConfig(vocab_size=tokenizer.vocab_size, pad_id=tokenizer.pad_id, **transformer)
+  transformer:
+    d_model: 256
+    n_layers: 4
+    n_heads: 8                 # d_head = d_model / n_heads, must be even (RoPE)
+    d_ff: null                 # null -> 4 * d_model
+    dropout: 0.1
+    attention_dropout: 0.0
+    rope_base: 10000.0
+    max_len: 2048              # RoPE cache, must be >= 2 * max_protein_length + 3
+
+heads:
+  # -> pooling, then ClassificationHead(input_dim, **classification without `pooling`)
+  #    input_dim = 2 * d_model for pair, d_model otherwise
+  classification:
+    pooling: pair              # pair | mean | max | cls
+    hidden_dims: [256]         # [] -> linear probe
+    activations: gelu          # gelu | relu | silu, one name or one per hidden layer
+    dropout: 0.1
+    norm: false
+
+  # -> MLMHead(d_model, vocab_size, **mlm without `tie_embedding`)
+  mlm:
+    hidden_dims: null          # null -> [d_model], as in ESM / BERT; [] -> single linear layer
+    activations: gelu
+    dropout: 0.0
+    norm: true
+    tie_embedding: true        # share the output matrix with the encoder's token embedding
+
+training:
+  device: auto                 # auto -> cuda, then mps, then cpu
+  precision: fp32              # fp32 | bf16 (bf16 halves activation memory)
+
+  # classification: experiment A, and the last stage of B
+  classification:
+    epochs: 20
+    lr: 3.0e-4
+    weight_decay: 0.01
+    warmup_ratio: 0.05         # share of the steps with a linear warmup, then cosine decay
+    grad_clip: 1.0
+    grad_accumulation: 1       # effective batch = batch_size * grad_accumulation
+    early_stopping_patience: 3 # epochs without improvement of the validation AUROC
+    freeze_encoder: false      # B, frozen variant: train the head only
+    encoder_lr_scale: 1.0      # B, fine-tuned variant: encoder lr = lr * encoder_lr_scale (e.g. 0.1)
+
+  # MLM pre-training: experiment B only, ignored by A
+  mlm:
+    epochs: 10
+    lr: 5.0e-4
+    weight_decay: 0.01
+    warmup_ratio: 0.05
+    grad_clip: 1.0
+    grad_accumulation: 1
+    early_stopping_patience: 2 # epochs without improvement of the validation perplexity
+
+logging:
+  tensorboard: true            # runs/<name>/tensorboard: scalars, curves, histograms, hparams
+  launch_tensorboard: true     # start TensorBoard on output_dir (or reuse it) and open the browser
+  tensorboard_port: 6006
+  log_every_steps: 50          # train/* and system/* (speed, memory) every N optimizer steps

@@ -7,7 +7,16 @@ name = "ppi-lm"
 version = "0.1.0"
 description = "From-scratch Mamba, Transformer, BiLSTM and CNN protein language models for PPI prediction"
 requires-python = ">=3.10"
-dependencies = ["torch>=2.1", "numpy", "scikit-learn", "tqdm"]
+dependencies = [
+    "torch>=2.1",
+    "numpy",
+    "scikit-learn",
+    "tqdm",
+    "pyyaml",
+    "tensorboard",
+    "matplotlib",
+    "psutil",
+]
 
 [project.optional-dependencies]
 dev = ["pytest", "ruff==0.16.8", "black==26.5.1", "pre-commit"]
