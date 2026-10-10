@@ -16,6 +16,9 @@ dependencies = [
     "tensorboard",
     "matplotlib",
     "psutil",
+    "plotly",
+    "networkx",
+    "pandas",
 ]
 
 [project.optional-dependencies]
